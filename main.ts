@@ -2,6 +2,7 @@
 // Environment variables:
 //   SA_JSON  = Firebase service account JSON (Secret)
 //   DB_URL   = https://xxxx-default-rtdb.firebaseio.com   (শেষে / নেই)
+//   CLICK_URL   (ঐচ্ছিক) = নোটিফিকেশনে চাপলে যে https লিংক খুলবে (না দিলে অ্যাপের service worker খোলে)
 //   ALLOW_ORIGIN (ঐচ্ছিক) = আপনার অ্যাডমিন সাইটের লিংক, যেমন https://admin.example.com
 //   NOTIF_NODE  (ঐচ্ছিক) = বার্তার নোড, ডিফল্ট: user_notifications   (গঠন: NOTIF_NODE/{uid}/{nid} = {title, body})
 //   USERS_NODE  (ঐচ্ছিক) = ইউজার নোড, ডিফল্ট: users
@@ -56,14 +57,31 @@ const reply = (text: string, status = 200) => new Response(text, { status, heade
 
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: cors() });
-  if (req.method !== "POST") return reply("ok");
+  if (req.method !== "POST") {
+    // ব্রাউজারে  লিংক/?status  খুললে কী ঠিক আছে দেখা যায় (গোপন মান দেখায় না, শুধু ok/missing)
+    if (new URL(req.url).searchParams.has("status")) {
+      let sa = "ok";
+      const raw = Deno.env.get("SA_JSON") || "";
+      if (!raw) sa = "missing";
+      else {
+        try { const j = JSON.parse(raw); if (!j.private_key || !j.client_email) sa = "no-private-key"; }
+        catch (_e) { sa = "invalid-json"; }
+      }
+      return new Response(JSON.stringify({ SA_JSON: sa, DB_URL: Deno.env.get("DB_URL") ? "ok" : "missing" }), {
+        headers: { ...cors(), "content-type": "application/json" },
+      });
+    }
+    return reply("ok");
+  }
   try {
     const { uid, nid } = await req.json();
     if (!uid || !nid || /[.#$\[\]\/]/.test(String(uid) + String(nid))) return reply("bad", 400);
 
-    const sa = JSON.parse(Deno.env.get("SA_JSON") || "{}");
+    let sa: any = {};
+    try { sa = JSON.parse(Deno.env.get("SA_JSON") || "{}"); } catch (_e) { sa = {}; }
     const DB = Deno.env.get("DB_URL") || "";
-    if (!sa.private_key || !DB) return reply("not-configured", 500);
+    const miss = [!sa.private_key && "SA_JSON", !DB && "DB_URL"].filter(Boolean);
+    if (miss.length) return reply("not-configured:" + miss.join("+"), 500);
 
     const NN = Deno.env.get("NOTIF_NODE") || "user_notifications";
     const UN = Deno.env.get("USERS_NODE") || "users";
@@ -85,7 +103,8 @@ Deno.serve(async (req: Request) => {
         message: {
           token,
           notification: { title: n.title || "নোটিফিকেশন", body: n.body || "" },
-          webpush: { fcm_options: { link: "/" } },
+          // CLICK_URL দিলে (পুরো https লিংক) ক্লিকে সেই লিংক খোলে। না দিলে অ্যাপের service worker নিজেই অ্যাপ খোলে।
+          ...(Deno.env.get("CLICK_URL") ? { webpush: { fcm_options: { link: Deno.env.get("CLICK_URL") } } } : {}),
         },
       }),
     });
